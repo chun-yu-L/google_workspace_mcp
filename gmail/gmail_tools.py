@@ -497,7 +497,7 @@ async def get_gmail_messages_content_batch(
     return final_output
 
 
-@server.tool()
+# @server.tool()
 @handle_http_errors("send_gmail_message", service_type="gmail")
 @require_google_service("gmail", GMAIL_SEND_SCOPE)
 async def send_gmail_message(
@@ -582,7 +582,7 @@ async def send_gmail_message(
     return f"Email sent! Message ID: {message_id}"
 
 
-@server.tool()
+# @server.tool()
 @handle_http_errors("draft_gmail_message", service_type="gmail")
 @require_google_service("gmail", GMAIL_COMPOSE_SCOPE)
 async def draft_gmail_message(
@@ -921,7 +921,7 @@ async def list_gmail_labels(service, user_google_email: str) -> str:
     return "\n".join(lines)
 
 
-@server.tool()
+# @server.tool()
 @handle_http_errors("manage_gmail_label", service_type="gmail")
 @require_google_service("gmail", GMAIL_LABELS_SCOPE)
 async def manage_gmail_label(
@@ -1000,7 +1000,7 @@ async def manage_gmail_label(
         return f"Label '{label_name}' (ID: {label_id}) deleted successfully!"
 
 
-@server.tool()
+# @server.tool()
 @handle_http_errors("modify_gmail_message_labels", service_type="gmail")
 @require_google_service("gmail", GMAIL_MODIFY_SCOPE)
 async def modify_gmail_message_labels(
@@ -1052,7 +1052,7 @@ async def modify_gmail_message_labels(
     return f"Message labels updated successfully!\nMessage ID: {message_id}\n{'; '.join(actions)}"
 
 
-@server.tool()
+# @server.tool()
 @handle_http_errors("batch_modify_gmail_message_labels", service_type="gmail")
 @require_google_service("gmail", GMAIL_MODIFY_SCOPE)
 async def batch_modify_gmail_message_labels(

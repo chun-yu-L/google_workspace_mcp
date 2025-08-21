@@ -100,7 +100,7 @@ async def health_check(request: Request):
     })
 
 
-@server.custom_route("/oauth2callback", methods=["GET"])
+# @server.custom_route("/oauth2callback", methods=["GET"])
 async def oauth2_callback(request: Request) -> HTMLResponse:
     """
     Handle OAuth2 callback from Google via a custom route.
@@ -149,7 +149,7 @@ async def oauth2_callback(request: Request) -> HTMLResponse:
         # Generic error page for any other issues during token exchange or credential saving
         return create_server_error_response(str(e))
 
-@server.tool()
+# @server.tool()
 async def start_google_auth(
     service_name: str,
     user_google_email: str = USER_GOOGLE_EMAIL

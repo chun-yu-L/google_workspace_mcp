@@ -6,7 +6,7 @@ from importlib import metadata
 
 # Local imports
 from core.server import server, set_transport_mode
-from core.utils import check_credentials_directory_permissions
+# from core.utils import check_credentials_directory_permissions
 
 logging.basicConfig(
     level=logging.INFO,
@@ -85,28 +85,28 @@ def main():
     # Import tool modules to register them with the MCP server via decorators
     tool_imports = {
         'gmail': lambda: __import__('gmail.gmail_tools'),
-        'drive': lambda: __import__('gdrive.drive_tools'),
-        'calendar': lambda: __import__('gcalendar.calendar_tools'),
-        'docs': lambda: __import__('gdocs.docs_tools'),
-        'sheets': lambda: __import__('gsheets.sheets_tools'),
-        'chat': lambda: __import__('gchat.chat_tools'),
-        'forms': lambda: __import__('gforms.forms_tools'),
-        'slides': lambda: __import__('gslides.slides_tools'),
-        'tasks': lambda: __import__('gtasks.tasks_tools'),
-        'search': lambda: __import__('gsearch.search_tools')
+        # 'drive': lambda: __import__('gdrive.drive_tools'),
+        # 'calendar': lambda: __import__('gcalendar.calendar_tools'),
+        # 'docs': lambda: __import__('gdocs.docs_tools'),
+        # 'sheets': lambda: __import__('gsheets.sheets_tools'),
+        # 'chat': lambda: __import__('gchat.chat_tools'),
+        # 'forms': lambda: __import__('gforms.forms_tools'),
+        # 'slides': lambda: __import__('gslides.slides_tools'),
+        # 'tasks': lambda: __import__('gtasks.tasks_tools'),
+        # 'search': lambda: __import__('gsearch.search_tools')
     }
 
     tool_icons = {
         'gmail': '📧',
-        'drive': '📁',
-        'calendar': '📅',
-        'docs': '📄',
-        'sheets': '📊',
-        'chat': '💬',
-        'forms': '📝',
-        'slides': '🖼️',
-        'tasks': '✓',
-        'search': '🔍'
+        # 'drive': '📁',
+        # 'calendar': '📅',
+        # 'docs': '📄',
+        # 'sheets': '📊',
+        # 'chat': '💬',
+        # 'forms': '📝',
+        # 'slides': '🖼️',
+        # 'tasks': '✓',
+        # 'search': '🔍'
     }
 
     # Import specified tools or all tools if none specified
@@ -129,36 +129,36 @@ def main():
         safe_print("🔐 Single-user mode enabled")
         safe_print("")
 
-    # Check credentials directory permissions before starting
-    try:
-        safe_print("🔍 Checking credentials directory permissions...")
-        check_credentials_directory_permissions()
-        safe_print("✅ Credentials directory permissions verified")
-        safe_print("")
-    except (PermissionError, OSError) as e:
-        safe_print(f"❌ Credentials directory permission check failed: {e}")
-        safe_print("   Please ensure the service has write permissions to create/access the credentials directory")
-        logger.error(f"Failed credentials directory permission check: {e}")
-        sys.exit(1)
+    # # Check credentials directory permissions before starting
+    # try:
+    #     safe_print("🔍 Checking credentials directory permissions...")
+    #     check_credentials_directory_permissions()
+    #     safe_print("✅ Credentials directory permissions verified")
+    #     safe_print("")
+    # except (PermissionError, OSError) as e:
+    #     safe_print(f"❌ Credentials directory permission check failed: {e}")
+    #     safe_print("   Please ensure the service has write permissions to create/access the credentials directory")
+    #     logger.error(f"Failed credentials directory permission check: {e}")
+    #     sys.exit(1)
 
     try:
         # Set transport mode for OAuth callback handling
         set_transport_mode(args.transport)
 
-        if args.transport == 'streamable-http':
-            safe_print(f"🚀 Starting server on {base_uri}:{port}")
-        else:
-            safe_print("🚀 Starting server in stdio mode")
-            # Start minimal OAuth callback server for stdio mode
-            from auth.oauth_callback_server import ensure_oauth_callback_available
-            success, error_msg = ensure_oauth_callback_available('stdio', port, base_uri)
-            if success:
-                safe_print(f"   OAuth callback server started on {base_uri}:{port}/oauth2callback")
-            else:
-                warning_msg = f"   ⚠️  Warning: Failed to start OAuth callback server"
-                if error_msg:
-                    warning_msg += f": {error_msg}"
-                safe_print(warning_msg)
+        # if args.transport == 'streamable-http':
+        #     safe_print(f"🚀 Starting server on {base_uri}:{port}")
+        # else:
+        #     safe_print("🚀 Starting server in stdio mode")
+        #     # Start minimal OAuth callback server for stdio mode
+        #     from auth.oauth_callback_server import ensure_oauth_callback_available
+        #     success, error_msg = ensure_oauth_callback_available('stdio', port, base_uri)
+        #     if success:
+        #         safe_print(f"   OAuth callback server started on {base_uri}:{port}/oauth2callback")
+        #     else:
+        #         warning_msg = f"   ⚠️  Warning: Failed to start OAuth callback server"
+        #         if error_msg:
+        #             warning_msg += f": {error_msg}"
+        #         safe_print(warning_msg)
 
         safe_print("   Ready for MCP connections!")
         safe_print("")

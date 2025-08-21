@@ -1,7 +1,7 @@
 import inspect
 import logging
 from functools import wraps
-from typing import Dict, List, Optional, Any, Callable, Union
+from typing import Dict, List, Optional, Any, Callable, Union, Tuple
 from datetime import datetime, timedelta
 
 from google.auth.exceptions import RefreshError
@@ -119,21 +119,70 @@ def _cache_service(cache_key: str, service: Any, user_email: str) -> None:
     logger.debug(f"Cached service for key: {cache_key}")
 
 
-def _resolve_scopes(scopes: Union[str, List[str]]) -> List[str]:
+def _resolve_scopes(required_scopes: Union[str, List[str]]) -> List[str]:
     """Resolve scope names to actual scope URLs."""
-    if isinstance(scopes, str):
-        if scopes in SCOPE_GROUPS:
-            return [SCOPE_GROUPS[scopes]]
+    if isinstance(required_scopes, str):
+        if required_scopes in SCOPE_GROUPS:
+            return [SCOPE_GROUPS[required_scopes]]
         else:
-            return [scopes]
+            return [required_scopes]
 
     resolved = []
-    for scope in scopes:
+    for scope in required_scopes:
         if scope in SCOPE_GROUPS:
             resolved.append(SCOPE_GROUPS[scope])
         else:
             resolved.append(scope)
     return resolved
+
+
+def _validate_auth_parameters(
+    user_google_email: str,
+    access_token: str,
+    refresh_token: str,
+    token_scopes: List[str],
+    service_type: str,
+    func_name: str,
+) -> Optional[str]:
+    """
+    Validate authentication parameters and service configuration.
+
+    Args:
+        user_google_email: User's Google email address
+        access_token: Google access token
+        refresh_token: Google refresh token
+        token_scopes: List of token scopes
+        service_type: Type of Google service
+        func_name: Name of the calling function (for error logging)
+
+    Returns:
+        None if validation passes, error message string if validation fails
+    """
+    # Validate user_google_email
+    if not user_google_email:
+        # This should ideally not be reached if 'user_google_email' is a required parameter
+        # in the function signature, but it's a good safeguard.
+        return "'user_google_email' parameter is required but was not found."
+
+    # Validate required authentication parameters
+    required_params = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_scopes": token_scopes,
+    }
+    missing = [k for k, v in required_params.items() if not v]
+    if missing:
+        logger.error(
+            f"Missing authentication parameters: {', '.join(missing)} for user {user_google_email} and function {func_name}."
+        )
+        return "Internal system error. Please contact customer support."
+
+    # Validate service type
+    if service_type not in SERVICE_CONFIGS:
+        logger.error(f"Unknown service type: {service_type} in function {func_name}")
+        return "Internal system error. Please contact customer support."
+
+    return None  # Validation passed
 
 
 def _handle_token_refresh_error(error: RefreshError, user_email: str, service_name: str) -> str:
@@ -150,13 +199,13 @@ def _handle_token_refresh_error(error: RefreshError, user_email: str, service_na
     """
     error_str = str(error)
 
+    service_display_name = f"Google {service_name.title()}"
+
     if 'invalid_grant' in error_str.lower() or 'expired or revoked' in error_str.lower():
         logger.warning(f"Token expired or revoked for user {user_email} accessing {service_name}")
 
         # Clear any cached service for this user to force fresh authentication
         clear_service_cache(user_email)
-
-        service_display_name = f"Google {service_name.title()}"
 
         return (
             f"**Authentication Required: Token Expired/Revoked for {service_display_name}**\n\n"
@@ -165,33 +214,66 @@ def _handle_token_refresh_error(error: RefreshError, user_email: str, service_na
             f"- The token has been unused for an extended period\n"
             f"- You've changed your Google account password\n"
             f"- You've revoked access to the application\n\n"
-            f"**To resolve this, please:**\n"
-            f"1. Run `start_google_auth` with your email ({user_email}) and service_name='{service_display_name}'\n"
-            f"2. Complete the authentication flow in your browser\n"
-            f"3. Retry your original command\n\n"
-            f"The application will automatically use the new credentials once authentication is complete."
+            f"**To fix this, please reauthorize the application by following these steps:**\n"
+            f"1. Go to your application's **Personal Settings Page**\n"
+            f"2. Find the section for **{service_display_name} Authorization**\n"
+            f"3. Follow the instructions there to complete reauthentication\n"
+            f"4. Once done, **retry your original command**\n\n"
+            f"The application will automatically use the new credentials after successful authorization."
         )
     else:
         # Handle other types of refresh errors
         logger.error(f"Unexpected refresh error for user {user_email}: {error}")
         return (
-            f"Authentication error occurred for {user_email}. "
-            f"Please try running `start_google_auth` with your email and the appropriate service name to reauthenticate."
+            f"An authentication error occurred for **{user_email}** while accessing {service_display_name}.\n\n"
+            f"Please try to reauthenticate in **Personal Settings Page** under the **{service_display_name}** section.\n"
         )
+
+
+def _prepare_fastmcp_signature(original_sig: inspect.Signature, params: list) -> Tuple[inspect.Signature, set[str]]:
+    """
+    Creates a new signature that excludes the 'service' parameter and
+    includes the access_token and refresh_token parameters.
+
+    This new signature is the one that will be exposed to FastMCP.
+
+    Args:
+        original_sig: The original function's signature.
+        params: The list of parameters from the original signature.
+        scopes: The list of scopes of the refreshed token.
+
+    Returns:
+        A tuple containing the new, modified signature and a set of the
+        parameter names that were added.
+    """
+    # Create token parameters to be added to the new signature
+    token_params = [
+        inspect.Parameter('access_token', inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=str),
+        inspect.Parameter('refresh_token', inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=str),
+        inspect.Parameter('token_scopes', inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=List[str]),
+    ]
+    
+    # Exclude the original 'service' parameter (the first one) and prepend the token parameters
+    wrapper_params = token_params + params[1:]
+
+    added_param_names = {p.name for p in token_params}
+
+    return original_sig.replace(parameters=wrapper_params), added_param_names
 
 
 def require_google_service(
     service_type: str,
-    scopes: Union[str, List[str]],
+    required_scopes: Union[str, List[str]],
     version: Optional[str] = None,
     cache_enabled: bool = True
 ):
     """
     Decorator that automatically handles Google service authentication and injection.
+    The access_token and refresh_token are passed in as arguments to the wrapper.
 
     Args:
         service_type: Type of Google service ("gmail", "drive", "calendar", etc.)
-        scopes: Required scopes (can be scope group names or actual URLs)
+        required_scopes: Required scopes (can be scope group names or actual URLs)
         version: Service version (defaults to standard version for service type)
         cache_enabled: Whether to use service caching (default: True)
 
@@ -207,41 +289,45 @@ def require_google_service(
         params = list(original_sig.parameters.values())
 
         # The decorated function must have 'service' as its first parameter.
-        if not params or params[0].name != 'service':
-            raise TypeError(
-                f"Function '{func.__name__}' decorated with @require_google_service "
-                "must have 'service' as its first parameter."
+        if not params or params[0].name != "service":
+            logger.error(
+                f"Function '{func.__name__}' decorated with @require_google_service must have 'service' as its first parameter."
             )
+            raise Exception("Internal system error. Please contact customer support.")
 
-        # Create a new signature for the wrapper that excludes the 'service' parameter.
-        # This is the signature that FastMCP will see.
-        wrapper_sig = original_sig.replace(parameters=params[1:])
+        wrapper_sig, added_params = _prepare_fastmcp_signature(original_sig, params)
 
         @wraps(func)
         async def wrapper(*args, **kwargs):
             # Note: `args` and `kwargs` are now the arguments for the *wrapper*,
-            # which does not include 'service'.
+            # which does not include 'service' and includes access_token and refresh_token
 
-            # Extract user_google_email from the arguments passed to the wrapper
+            # Extract user_google_email, access_token, and refresh_token from wrapper arguments
             bound_args = wrapper_sig.bind(*args, **kwargs)
             bound_args.apply_defaults()
             user_google_email = bound_args.arguments.get('user_google_email')
+            access_token = bound_args.arguments.get('access_token')
+            refresh_token = bound_args.arguments.get('refresh_token')
+            token_scopes = bound_args.arguments.get('token_scopes')
 
-            if not user_google_email:
-                # This should ideally not be reached if 'user_google_email' is a required parameter
-                # in the function signature, but it's a good safeguard.
-                raise Exception("'user_google_email' parameter is required but was not found.")
-
-            # Get service configuration from the decorator's arguments
-            if service_type not in SERVICE_CONFIGS:
-                raise Exception(f"Unknown service type: {service_type}")
+            # Validate all authentication parameters and service configuration
+            validation_error = _validate_auth_parameters(
+                user_google_email=user_google_email,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                token_scopes=token_scopes,
+                service_type=service_type,
+                func_name=func.__name__
+            )
+            if validation_error:
+                raise Exception(validation_error)
 
             config = SERVICE_CONFIGS[service_type]
             service_name = config["service"]
             service_version = version or config["version"]
 
             # Resolve scopes
-            resolved_scopes = _resolve_scopes(scopes)
+            resolved_scopes = _resolve_scopes(required_scopes)
 
             # --- Service Caching and Authentication Logic (largely unchanged) ---
             service = None
@@ -262,6 +348,9 @@ def require_google_service(
                         tool_name=tool_name,
                         user_google_email=user_google_email,
                         required_scopes=resolved_scopes,
+                        access_token=access_token,
+                        refresh_token=refresh_token,
+                        token_scopes=token_scopes,
                     )
                     if cache_enabled:
                         cache_key = _get_cache_key(user_google_email, service_name, service_version, resolved_scopes)
@@ -271,8 +360,12 @@ def require_google_service(
 
             # --- Call the original function with the service object injected ---
             try:
+                # Remove access_token and refresh_token from kwargs before calling original function
+                original_kwargs = {k: v for k, v in kwargs.items() 
+                                   if k not in added_params}
+                
                 # Prepend the fetched service object to the original arguments
-                return await func(service, *args, **kwargs)
+                return await func(service, *args, **original_kwargs)
             except RefreshError as e:
                 error_message = _handle_token_refresh_error(e, actual_user_email, service_name)
                 raise Exception(error_message)
@@ -285,6 +378,7 @@ def require_google_service(
 
 def require_multiple_services(service_configs: List[Dict[str, Any]]):
     """
+    # TODO: This should be modify according to the require_google_service decorator
     Decorator for functions that need multiple Google services.
 
     Args:
