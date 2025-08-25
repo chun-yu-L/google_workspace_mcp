@@ -351,14 +351,12 @@ def create_oauth_flow(
 # --- Core OAuth Logic ---
 
 async def request_client_authentication(
-    user_google_email: Optional[str],
     service_name: str,  # e.g., "Google Calendar", "Gmail" for user messages
 ) -> str:
     """
     Request client authentication from the user.
 
     Args:
-        user_google_email: The user's specified Google email, if provided.
         service_name: The name of the Google service requiring auth (for user messages).
 
     Returns:
@@ -367,43 +365,16 @@ async def request_client_authentication(
     Raises:
         Exception: If the OAuth flow cannot be initiated.
     """
-    initial_email_provided = bool(
-        user_google_email
-        and user_google_email.strip()
-        and user_google_email.lower() != "default"
-    )
-    user_display_name = (
-        f"{service_name} for '{user_google_email}'"
-        if initial_email_provided
-        else service_name
-    )
+    return f"""**ACTION REQUIRED: Google Authentication Needed for {service_name}**
 
-    message_lines = [
-        f"**ACTION REQUIRED: Google Authentication Needed for {user_display_name}**\n",
-        f"To proceed, the user must authorize this application for {service_name} access using all required permissions.",
-        "**LLM, please instruct the user as follows:**",
-        "1. Go to the **Personal Settings Page** in the application.",
-        f"2. Locate the section for **{service_name} Authorization**.",
-        "3. Follow the instructions there to complete the authorization process in your browser.",
-    ]
-
-    if not initial_email_provided:
-        message_lines.extend(
-            [
-                "4. After successful authorization, the page will show your authenticated Google email address.",
-                "   **LLM: Instruct the user to provide you with this email address.**",
-                "5. Once you have the email, **retry their original command, ensuring you include this `user_google_email`.**",
-            ]
-        )
-    else:
-        message_lines.append(
-            "4. After successful authorization, **retry their original command**."
-        )
-
-    message_lines.append(
-        f"\nThe application will use the new credentials. If '{user_google_email}' was provided, it must match the authenticated account."
-    )
-    return "\n".join(message_lines)
+To proceed, the user must authorize this application for {service_name} access using all required permissions.
+**LLM, please instruct the user as follows:**
+1. Go to the **Personal Settings Page** in the application.
+2. Locate the section for **{service_name} Authorization**.
+3. Follow the instructions there to complete the authorization process in your browser.
+4. After successful authorization, the page will show your authenticated Google email address.
+   **LLM: Instruct the user to provide you with this email address.**
+5. Once you have the email, **retry their original command, ensuring you include this `user_google_email`.**"""
 
 
 async def start_auth_flow(
@@ -591,7 +562,6 @@ def handle_auth_callback(
 
 
 def get_credentials(
-    user_google_email: str,
     access_token: str,
     refresh_token: str,
     token_scopes: List[str],
@@ -601,7 +571,6 @@ def get_credentials(
     Retrieves stored credentials, refreshes if necessary.
 
     Args:
-        user_google_email: user's Google email.
         access_token: OAuth access token.
         refresh_token: OAuth refresh token.
         token_scopes: List of scopes of the refreshed token.
@@ -613,7 +582,7 @@ def get_credentials(
     credentials: Optional[Credentials] = None
 
     logger.info(
-        f"[get_credentials] Called for user_google_email: '{user_google_email}', required_scopes: {required_scopes}"
+        f"[get_credentials] required_scopes: {required_scopes}"
     )
 
     credentials = Credentials(
@@ -627,12 +596,12 @@ def get_credentials(
     )
 
     logger.info(
-        f"[get_credentials] Credentials constructed for user_google_email: '{user_google_email}', required_scopes: {required_scopes}"
+        f"[get_credentials] Credentials constructed, required_scopes: {required_scopes}"
     )
 
     if not all(scope in credentials.scopes for scope in required_scopes):
         logger.warning(
-            f"[get_credentials] Credentials lack required scopes. Need: {required_scopes}, Have: {credentials.scopes}. User: '{user_google_email}'"
+            f"[get_credentials] Credentials lack required scopes. Need: {required_scopes}, Have: {credentials.scopes}."
         )
         return None  # Re-authentication needed for scopes
 
@@ -675,21 +644,19 @@ async def get_authenticated_google_service(
     service_name: str,  # "gmail", "calendar", "drive", "docs"
     version: str,  # "v1", "v3"
     tool_name: str,  # For logging/debugging
-    user_google_email: str,  # Required - no more Optional
     required_scopes: List[str],
     access_token: str,
     refresh_token: str,
     token_scopes: List[str],
-) -> tuple[Any, str]:
+) -> tuple[Any, str | None]:
     """
     Centralized Google service authentication for all MCP tools.
-    Returns (service, user_email) on success or raises GoogleAuthenticationError.
+    Returns (service) on success or raises GoogleAuthenticationError.
 
     Args:
         service_name: The Google service name ("gmail", "calendar", "drive", "docs")
         version: The API version ("v1", "v3", etc.)
         tool_name: The name of the calling tool (for logging/debugging)
-        user_google_email: The user's Google email address (required)
         required_scopes: List of required OAuth scopes
         access_token: OAuth access token
         refresh_token: OAuth refresh token
@@ -702,18 +669,11 @@ async def get_authenticated_google_service(
         GoogleAuthenticationError: When authentication is required or fails
     """
     logger.info(
-        f"[{tool_name}] Attempting to get authenticated {service_name} service. Email: '{user_google_email}'"
+        f"[{tool_name}] Attempting to get authenticated {service_name} service."
     )
-
-    # Validate email format
-    if not user_google_email or "@" not in user_google_email:
-        error_msg = f"Authentication required for {tool_name}. No valid 'user_google_email' provided. Please provide a valid Google email address."
-        logger.info(f"[{tool_name}] {error_msg}")
-        raise GoogleAuthenticationError(error_msg)
 
     credentials = await asyncio.to_thread(
         get_credentials,
-        user_google_email=user_google_email,
         required_scopes=required_scopes,
         access_token=access_token,
         refresh_token=refresh_token,
@@ -722,11 +682,10 @@ async def get_authenticated_google_service(
 
     if not credentials or not credentials.valid:
         logger.warning(
-            f"[{tool_name}] No valid credentials. Email: '{user_google_email}'."
+            f"[{tool_name}] No valid credentials."
         )
 
         auth_response = await request_client_authentication(
-            user_google_email=user_google_email,
             service_name=f"Google {service_name.title()}",
         )
 
@@ -734,7 +693,7 @@ async def get_authenticated_google_service(
 
     try:
         service = build(service_name, version, credentials=credentials)
-        log_user_email = user_google_email
+        log_user_email = None
 
         # Try to get email from credentials if needed for validation
         if credentials and credentials.id_token:
@@ -750,9 +709,15 @@ async def get_authenticated_google_service(
             except Exception as e:
                 logger.debug(f"[{tool_name}] Could not decode id_token: {e}")
 
-        logger.info(
-            f"[{tool_name}] Successfully authenticated {service_name} service for user: {log_user_email}"
-        )
+        if log_user_email:
+            logger.info(
+                f"[{tool_name}] Successfully authenticated {service_name} service for user: {log_user_email}"
+            )
+        else:
+            logger.info(
+                f"[{tool_name}] Successfully authenticated {service_name} service (user email not available)"
+            )
+
         return service, log_user_email
 
     except Exception as e:

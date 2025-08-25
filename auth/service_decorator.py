@@ -2,7 +2,6 @@ import inspect
 import logging
 from functools import wraps
 from typing import Dict, List, Optional, Any, Callable, Union, Tuple
-from datetime import datetime, timedelta
 
 from google.auth.exceptions import RefreshError
 from auth.google_auth import get_authenticated_google_service, GoogleAuthenticationError
@@ -83,41 +82,6 @@ SCOPE_GROUPS = {
     "customsearch": CUSTOM_SEARCH_SCOPE,
 }
 
-# Service cache: {cache_key: (service, cached_time, user_email)}
-_service_cache: Dict[str, tuple[Any, datetime, str]] = {}
-_cache_ttl = timedelta(minutes=30)  # Cache services for 30 minutes
-
-
-def _get_cache_key(user_email: str, service_name: str, version: str, scopes: List[str]) -> str:
-    """Generate a cache key for service instances."""
-    sorted_scopes = sorted(scopes)
-    return f"{user_email}:{service_name}:{version}:{':'.join(sorted_scopes)}"
-
-
-def _is_cache_valid(cached_time: datetime) -> bool:
-    """Check if cached service is still valid."""
-    return datetime.now() - cached_time < _cache_ttl
-
-
-def _get_cached_service(cache_key: str) -> Optional[tuple[Any, str]]:
-    """Retrieve cached service if valid."""
-    if cache_key in _service_cache:
-        service, cached_time, user_email = _service_cache[cache_key]
-        if _is_cache_valid(cached_time):
-            logger.debug(f"Using cached service for key: {cache_key}")
-            return service, user_email
-        else:
-            # Remove expired cache entry
-            del _service_cache[cache_key]
-            logger.debug(f"Removed expired cache entry: {cache_key}")
-    return None
-
-
-def _cache_service(cache_key: str, service: Any, user_email: str) -> None:
-    """Cache a service instance."""
-    _service_cache[cache_key] = (service, datetime.now(), user_email)
-    logger.debug(f"Cached service for key: {cache_key}")
-
 
 def _resolve_scopes(required_scopes: Union[str, List[str]]) -> List[str]:
     """Resolve scope names to actual scope URLs."""
@@ -137,7 +101,6 @@ def _resolve_scopes(required_scopes: Union[str, List[str]]) -> List[str]:
 
 
 def _validate_auth_parameters(
-    user_google_email: str,
     access_token: str,
     refresh_token: str,
     token_scopes: List[str],
@@ -148,7 +111,6 @@ def _validate_auth_parameters(
     Validate authentication parameters and service configuration.
 
     Args:
-        user_google_email: User's Google email address
         access_token: Google access token
         refresh_token: Google refresh token
         token_scopes: List of token scopes
@@ -158,12 +120,6 @@ def _validate_auth_parameters(
     Returns:
         None if validation passes, error message string if validation fails
     """
-    # Validate user_google_email
-    if not user_google_email:
-        # This should ideally not be reached if 'user_google_email' is a required parameter
-        # in the function signature, but it's a good safeguard.
-        return "'user_google_email' parameter is required but was not found."
-
     # Validate required authentication parameters
     required_params = {
         "access_token": access_token,
@@ -173,7 +129,7 @@ def _validate_auth_parameters(
     missing = [k for k, v in required_params.items() if not v]
     if missing:
         logger.error(
-            f"Missing authentication parameters: {', '.join(missing)} for user {user_google_email} and function {func_name}."
+            f"Missing authentication parameters: {', '.join(missing)} for function {func_name}."
         )
         return "Internal system error. Please contact customer support."
 
@@ -185,13 +141,12 @@ def _validate_auth_parameters(
     return None  # Validation passed
 
 
-def _handle_token_refresh_error(error: RefreshError, user_email: str, service_name: str) -> str:
+def _handle_token_refresh_error(error: RefreshError, service_name: str) -> str:
     """
     Handle token refresh errors gracefully, particularly expired/revoked tokens.
 
     Args:
         error: The RefreshError that occurred
-        user_email: User's email address
         service_name: Name of the Google service
 
     Returns:
@@ -202,14 +157,11 @@ def _handle_token_refresh_error(error: RefreshError, user_email: str, service_na
     service_display_name = f"Google {service_name.title()}"
 
     if 'invalid_grant' in error_str.lower() or 'expired or revoked' in error_str.lower():
-        logger.warning(f"Token expired or revoked for user {user_email} accessing {service_name}")
-
-        # Clear any cached service for this user to force fresh authentication
-        clear_service_cache(user_email)
+        logger.warning(f"Token expired or revoked for accessing {service_name}")
 
         return (
             f"**Authentication Required: Token Expired/Revoked for {service_display_name}**\n\n"
-            f"Your Google authentication token for {user_email} has expired or been revoked. "
+            f"Your Google authentication token has expired or been revoked. "
             f"This commonly happens when:\n"
             f"- The token has been unused for an extended period\n"
             f"- You've changed your Google account password\n"
@@ -223,9 +175,9 @@ def _handle_token_refresh_error(error: RefreshError, user_email: str, service_na
         )
     else:
         # Handle other types of refresh errors
-        logger.error(f"Unexpected refresh error for user {user_email}: {error}")
+        logger.error(f"Unexpected refresh error for user: {error}")
         return (
-            f"An authentication error occurred for **{user_email}** while accessing {service_display_name}.\n\n"
+            f"An authentication error occurred while accessing {service_display_name}.\n\n"
             f"Please try to reauthenticate in **Personal Settings Page** under the **{service_display_name}** section.\n"
         )
 
@@ -265,7 +217,6 @@ def require_google_service(
     service_type: str,
     required_scopes: Union[str, List[str]],
     version: Optional[str] = None,
-    cache_enabled: bool = True
 ):
     """
     Decorator that automatically handles Google service authentication and injection.
@@ -279,7 +230,7 @@ def require_google_service(
 
     Usage:
         @require_google_service("gmail", "gmail_read")
-        async def search_messages(service, user_google_email: str, query: str):
+        async def search_messages(service, query: str):
             # service parameter is automatically injected
             # Original authentication logic is handled automatically
     """
@@ -302,17 +253,15 @@ def require_google_service(
             # Note: `args` and `kwargs` are now the arguments for the *wrapper*,
             # which does not include 'service' and includes access_token and refresh_token
 
-            # Extract user_google_email, access_token, and refresh_token from wrapper arguments
+            # Extract access_token, and refresh_token from wrapper arguments
             bound_args = wrapper_sig.bind(*args, **kwargs)
             bound_args.apply_defaults()
-            user_google_email = bound_args.arguments.get('user_google_email')
             access_token = bound_args.arguments.get('access_token')
             refresh_token = bound_args.arguments.get('refresh_token')
             token_scopes = bound_args.arguments.get('token_scopes')
 
             # Validate all authentication parameters and service configuration
             validation_error = _validate_auth_parameters(
-                user_google_email=user_google_email,
                 access_token=access_token,
                 refresh_token=refresh_token,
                 token_scopes=token_scopes,
@@ -331,32 +280,20 @@ def require_google_service(
 
             # --- Service Caching and Authentication Logic (largely unchanged) ---
             service = None
-            actual_user_email = user_google_email
-
-            if cache_enabled:
-                cache_key = _get_cache_key(user_google_email, service_name, service_version, resolved_scopes)
-                cached_result = _get_cached_service(cache_key)
-                if cached_result:
-                    service, actual_user_email = cached_result
-
-            if service is None:
-                try:
-                    tool_name = func.__name__
-                    service, actual_user_email = await get_authenticated_google_service(
-                        service_name=service_name,
-                        version=service_version,
-                        tool_name=tool_name,
-                        user_google_email=user_google_email,
-                        required_scopes=resolved_scopes,
-                        access_token=access_token,
-                        refresh_token=refresh_token,
-                        token_scopes=token_scopes,
-                    )
-                    if cache_enabled:
-                        cache_key = _get_cache_key(user_google_email, service_name, service_version, resolved_scopes)
-                        _cache_service(cache_key, service, actual_user_email)
-                except GoogleAuthenticationError as e:
-                    raise Exception(str(e))
+            try:
+                tool_name = func.__name__
+                service, actual_user_email = await get_authenticated_google_service(
+                    service_name=service_name,
+                    version=service_version,
+                    tool_name=tool_name,
+                    required_scopes=resolved_scopes,
+                    access_token=access_token,
+                    refresh_token=refresh_token,
+                    token_scopes=token_scopes,
+                )
+                logger.info(f"Get service '{service_name}' for user '{actual_user_email}'")
+            except GoogleAuthenticationError as e:
+                raise Exception(str(e))
 
             # --- Call the original function with the service object injected ---
             try:
@@ -367,7 +304,7 @@ def require_google_service(
                 # Prepend the fetched service object to the original arguments
                 return await func(service, *args, **original_kwargs)
             except RefreshError as e:
-                error_message = _handle_token_refresh_error(e, actual_user_email, service_name)
+                error_message = _handle_token_refresh_error(e, service_name)
                 raise Exception(error_message)
 
         # Set the wrapper's signature to the one without 'service'
@@ -393,7 +330,7 @@ def require_multiple_services(service_configs: List[Dict[str, Any]]):
             {"service_type": "drive", "scopes": "drive_read", "param_name": "drive_service"},
             {"service_type": "docs", "scopes": "docs_read", "param_name": "docs_service"}
         ])
-        async def get_doc_with_metadata(drive_service, docs_service, user_google_email: str, doc_id: str):
+        async def get_doc_with_metadata(drive_service, docs_service, doc_id: str):
             # Both services are automatically injected
     """
     def decorator(func: Callable) -> Callable:
@@ -458,48 +395,3 @@ def require_multiple_services(service_configs: List[Dict[str, Any]]):
 
         return wrapper
     return decorator
-
-
-def clear_service_cache(user_email: Optional[str] = None) -> int:
-    """
-    Clear service cache entries.
-
-    Args:
-        user_email: If provided, only clear cache for this user. If None, clear all.
-
-    Returns:
-        Number of cache entries cleared.
-    """
-    global _service_cache
-
-    if user_email is None:
-        count = len(_service_cache)
-        _service_cache.clear()
-        logger.info(f"Cleared all {count} service cache entries")
-        return count
-
-    keys_to_remove = [key for key in _service_cache.keys() if key.startswith(f"{user_email}:")]
-    for key in keys_to_remove:
-        del _service_cache[key]
-
-    logger.info(f"Cleared {len(keys_to_remove)} service cache entries for user {user_email}")
-    return len(keys_to_remove)
-
-
-def get_cache_stats() -> Dict[str, Any]:
-    """Get service cache statistics."""
-    valid_entries = 0
-    expired_entries = 0
-
-    for _, (_, cached_time, _) in _service_cache.items():
-        if _is_cache_valid(cached_time):
-            valid_entries += 1
-        else:
-            expired_entries += 1
-
-    return {
-        "total_entries": len(_service_cache),
-        "valid_entries": valid_entries,
-        "expired_entries": expired_entries,
-        "cache_ttl_minutes": _cache_ttl.total_seconds() / 60
-    }
