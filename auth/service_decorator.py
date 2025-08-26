@@ -131,12 +131,12 @@ def _validate_auth_parameters(
         logger.error(
             f"Missing authentication parameters: {', '.join(missing)} for function {func_name}."
         )
-        return "Internal system error. Please contact customer support."
+        return f"Internal system error. Please contact customer support. Missing authentication parameters: {', '.join(missing)} for function {func_name}"
 
     # Validate service type
     if service_type not in SERVICE_CONFIGS:
         logger.error(f"Unknown service type: {service_type} in function {func_name}")
-        return "Internal system error. Please contact customer support."
+        return f"Internal system error. Please contact customer support. Unknown service type: {service_type} in function {func_name}"
 
     return None  # Validation passed
 
@@ -182,7 +182,7 @@ def _handle_token_refresh_error(error: RefreshError, service_name: str) -> str:
         )
 
 
-def _prepare_fastmcp_signature(original_sig: inspect.Signature, params: list) -> Tuple[inspect.Signature, set[str]]:
+def _prepare_fastmcp_signature(original_signature: inspect.Signature, parameters_to_remove: list) -> Tuple[inspect.Signature, set[str]]:
     """
     Creates a new signature that excludes the 'service' parameter and
     includes the access_token and refresh_token parameters.
@@ -190,9 +190,8 @@ def _prepare_fastmcp_signature(original_sig: inspect.Signature, params: list) ->
     This new signature is the one that will be exposed to FastMCP.
 
     Args:
-        original_sig: The original function's signature.
-        params: The list of parameters from the original signature.
-        scopes: The list of scopes of the refreshed token.
+        original_signature: The original function's signature.
+        parameters_to_remove: The list of parameters to remove from the original signature.
 
     Returns:
         A tuple containing the new, modified signature and a set of the
@@ -205,12 +204,16 @@ def _prepare_fastmcp_signature(original_sig: inspect.Signature, params: list) ->
         inspect.Parameter('token_scopes', inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=List[str]),
     ]
     
-    # Exclude the original 'service' parameter (the first one) and prepend the token parameters
-    wrapper_params = token_params + params[1:]
+    retained_parameters = [
+        param for param in original_signature.parameters.values()
+        if param.name not in set(parameters_to_remove)
+    ]
+
+    wrapper_params = original_signature.replace(parameters=token_params + retained_parameters)
 
     added_param_names = {p.name for p in token_params}
 
-    return original_sig.replace(parameters=wrapper_params), added_param_names
+    return wrapper_params, added_param_names
 
 
 def require_google_service(
@@ -246,8 +249,11 @@ def require_google_service(
             )
             raise Exception("Internal system error. Please contact customer support.")
 
-        wrapper_sig, added_params = _prepare_fastmcp_signature(original_sig, params)
-
+        wrapper_sig, added_params = _prepare_fastmcp_signature(
+            original_signature=original_sig,
+            parameters_to_remove=["service"],
+        )
+        
         @wraps(func)
         async def wrapper(*args, **kwargs):
             # Note: `args` and `kwargs` are now the arguments for the *wrapper*,
@@ -315,8 +321,7 @@ def require_google_service(
 
 def require_multiple_services(service_configs: List[Dict[str, Any]]):
     """
-    # TODO: This should be modify according to the require_google_service decorator
-    Decorator for functions that need multiple Google services.
+    Decorator for functions that need multiple Google services, using token-based authentication.
 
     Args:
         service_configs: List of service configurations, each containing:
@@ -334,35 +339,51 @@ def require_multiple_services(service_configs: List[Dict[str, Any]]):
             # Both services are automatically injected
     """
     def decorator(func: Callable) -> Callable:
+        # Inspect the original function signature
+        original_sig = inspect.signature(func)
+        original_params = list(original_sig.parameters.keys())
+
+        # Ensure the decorated function's first N parameters match the configured service param names
+        configured_param_names = [config["param_name"] for config in service_configs]
+        if original_params[: len(configured_param_names)] != configured_param_names:
+            logger.error(
+                f"Function '{func.__name__}' decorated with @require_multiple_services must have its first "
+                f"{len(configured_param_names)} parameters named exactly {configured_param_names}."
+            )
+            raise Exception("Internal system error. Please contact customer support.")
+
+        # Prepare the wrapper signature: remove all service params and add token params
+        wrapper_sig, added_param_names = _prepare_fastmcp_signature(
+            original_signature=original_sig,
+            parameters_to_remove=configured_param_names,
+        )
+
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            # Extract user_google_email
-            sig = inspect.signature(func)
-            param_names = list(sig.parameters.keys())
+            # Bind to extract tokens
+            bound_args = wrapper_sig.bind(*args, **kwargs)
+            bound_args.apply_defaults()
+            access_token = bound_args.arguments.get("access_token")
+            refresh_token = bound_args.arguments.get("refresh_token")
+            token_scopes = bound_args.arguments.get("token_scopes")
 
-            user_google_email = None
-            if 'user_google_email' in kwargs:
-                user_google_email = kwargs['user_google_email']
-            else:
-                try:
-                    user_email_index = param_names.index('user_google_email')
-                    if user_email_index < len(args):
-                        user_google_email = args[user_email_index]
-                except ValueError:
-                    pass
-
-            if not user_google_email:
-                raise Exception("user_google_email parameter is required but not found")
-
-            # Authenticate all services
+            # Authenticate all services and collect in order
+            injected_services = []
             for config in service_configs:
                 service_type = config["service_type"]
                 scopes = config["scopes"]
-                param_name = config["param_name"]
                 version = config.get("version")
 
-                if service_type not in SERVICE_CONFIGS:
-                    raise Exception(f"Unknown service type: {service_type}")
+                # Validate auth parameters and service type for each service
+                validation_error = _validate_auth_parameters(
+                    access_token=access_token,
+                    refresh_token=refresh_token,
+                    token_scopes=token_scopes,
+                    service_type=service_type,
+                    func_name=func.__name__,
+                )
+                if validation_error:
+                    raise Exception(validation_error)
 
                 service_config = SERVICE_CONFIGS[service_type]
                 service_name = service_config["service"]
@@ -371,27 +392,32 @@ def require_multiple_services(service_configs: List[Dict[str, Any]]):
 
                 try:
                     tool_name = func.__name__
-                    service, _ = await get_authenticated_google_service(
+                    service, actual_user_email = await get_authenticated_google_service(
                         service_name=service_name,
                         version=service_version,
                         tool_name=tool_name,
-                        user_google_email=user_google_email,
                         required_scopes=resolved_scopes,
+                        access_token=access_token,
+                        refresh_token=refresh_token,
+                        token_scopes=token_scopes,
                     )
-
-                    # Inject service with specified parameter name
-                    kwargs[param_name] = service
-
+                    logger.info(
+                        f"Get service '{service_name}' for user '{actual_user_email}' (multi-service)"
+                    )
+                    injected_services.append(service)
                 except GoogleAuthenticationError as e:
                     raise Exception(str(e))
 
-            # Call the original function with refresh error handling
+            # Remove token params from kwargs before calling original function
+            original_kwargs = {k: v for k, v in kwargs.items() if k not in added_param_names}
+
+            # Prepend all service objects to the original arguments in order
             try:
-                return await func(*args, **kwargs)
+                return await func(*injected_services, *args, **original_kwargs)
             except RefreshError as e:
-                # Handle token refresh errors gracefully
-                error_message = _handle_token_refresh_error(e, user_google_email, "Multiple Services")
+                error_message = _handle_token_refresh_error(e, "Multiple Services")
                 raise Exception(error_message)
 
+        wrapper.__signature__ = wrapper_sig
         return wrapper
     return decorator
