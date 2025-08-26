@@ -85,7 +85,7 @@ def main():
     # Import tool modules to register them with the MCP server via decorators
     tool_imports = {
         'gmail': lambda: __import__('gmail.gmail_tools'),
-        # 'drive': lambda: __import__('gdrive.drive_tools'),
+        'drive': lambda: __import__('gdrive.drive_tools'),
         # 'calendar': lambda: __import__('gcalendar.calendar_tools'),
         'docs': lambda: __import__('gdocs.docs_tools'),
         # 'sheets': lambda: __import__('gsheets.sheets_tools'),
@@ -98,7 +98,7 @@ def main():
 
     tool_icons = {
         'gmail': '📧',
-        # 'drive': '📁',
+        'drive': '📁',
         # 'calendar': '📅',
         'docs': '📄',
         # 'sheets': '📊',
